@@ -1,0 +1,409 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(knitr)
+library(xtable)
+library(dplyr)
+library(AER)
+library(plm)
+library(multiwayvcov)
+library(magrittr)
+library(miceadds)
+library(car)
+library(lmtest)
+library(sandwich)
+library(psych)
+library(stargazer)
+library(haven)
+library(Amelia)
+library(mice)
+library(lattice)
+library(VIM)
+library(mitools)
+library(miceadds)
+library(ggplot2)
+library(cobalt)
+library(gridExtra)
+library(tidyverse)
+library(gtable)
+library(grid)
+
+```
+
+
+```{r}
+#!diagnostics suppress=<comma-separated list of variables>
+```
+
+```{r}
+dat <- read_dta("/Users/swimmingcircle/Documents/CS112_Decision/social_network/0422analysis.dta")
+```
+
+```{r}
+dat
+```
+
+# Descriptive statistics
+```{r}
+panelA <- dat %>% 
+  select(male, age, agpop, educ, ricearea_2010, rice_inc, disaster_yes, disaster_loss, risk_averse, disaster_prob, understanding) %>% 
+  summarise_all(funs(n = sum(!is.na(.)), mean = mean(., na.rm = TRUE), sd = sd(., na.rm = TRUE))) %>% 
+  matrix(nrow = 11, ncol = 3) %>%
+  set_rownames(c("male", "age", "agpop", "educ", "ricearea_2010", "rice_inc", "disaster_yes", "disaster_loss", "risk_averse", "disaster_prob", "understanding")) %>%
+  set_colnames(c('n', 'mean', 'sd'))
+
+panelB <- dat %>% 
+  select(network_obs, network_rate_preintensive, network_twoside, network_second) %>% 
+  summarise_all(funs(n = sum(!is.na(.)), mean = mean(., na.rm = TRUE), sd = sd(., na.rm = TRUE))) %>% 
+  matrix(nrow = 4, ncol = 3) %>% 
+  set_rownames(c("network_obs", "network_rate_preintensive", "network_twoside", "network_second"))%>% 
+  set_colnames(c('n', 'mean', 'sd'))
+
+panelC <- dat %>% 
+  select(indegree, path_out_ind, eigenvector) %>% 
+  summarise_all(funs(n = sum(!is.na(.)), mean = mean(., na.rm = TRUE), sd = sd(., na.rm = TRUE))) %>% 
+  matrix(nrow = 3, ncol = 3) %>% 
+  set_colnames(c('n', 'mean', 'sd')) %>% 
+  set_rownames(c("indegree", "path_out_ind", "eigenvector"))
+
+```
+
+```{r}
+panelA
+print('')
+panelB
+print('')
+panelC
+```
+
+
+```{r}
+#average takeup rate
+takeup_summary <- dat %>% 
+  select(takeup_survey) %>% 
+  summarise_all(funs(n = sum(!is.na(.)), mean = mean(., na.rm = TRUE), sd = sd(., na.rm = TRUE))) %>%
+  as.data.frame(row.names = c('n', 'mean','sd')) %>% 
+  mutate(session = "total")
+
+takeup_summary
+
+```
+
+
+```{r}
+
+#Define 1st, 2nd round , simple intensive  session
+#Delay = 0 is the 1st round, intensive = 0 is simple session
+dat$session <- 0
+dat$session[dat$delay == 0 & dat$intensive == 0] <- 11
+dat$session[dat$delay == 0 & dat$intensive == 1] <- 12
+dat$session[dat$delay == 1 & dat$intensive == 0] <- 21
+dat$session[dat$delay == 1 & dat$intensive == 1] <- 22
+dat$session <- as.factor(dat$session)
+as.data.frame(table(dat$session))
+```
+```{r}
+dat
+```
+
+
+```{r}
+#Check the takeup rate by different session
+takeup_by_session <- dat %>% 
+  select(takeup_survey, info_none, session) %>% 
+  filter(info_none == 1) %>% 
+  group_by(session) %>% 
+  summarise(n = sum(!is.na(takeup_survey)), mean = mean(takeup_survey, na.rm = TRUE), sd = sd(takeup_survey, na.rm = TRUE)) %>% 
+  data.frame()
+
+
+panelD <- rbind(takeup_by_session, takeup_summary)
+panelD
+```
+
+# Intensive Session Effect
+## Table 2 replication column 1
+```{r}
+#Choose 1st round to measure the effect of intensive sesison
+round1dat <- dat[dat$delay == 0, ]
+
+lm_t2c1 <- lm(takeup_survey ~ intensive + male + age + agpop + ricearea_2010 + literacy + 
+                village, data = round1dat)
+lm_t2c1
+
+```
+#Extension 1: Use matching to check the intensive session effect 
+
+```{r}
+#import matching library
+library(Matching)
+library(MatchIt)
+```
+
+
+```{r}
+#Subset the variable we will be match on 
+round1dat_NA <- round1dat %>% select(intensive, male,age, agpop, ricearea_2010, literacy, village, takeup_survey)
+
+#Find the columns that has NA 
+colnames(round1dat_NA)[colSums(is.na(round1dat_NA)) > 0]
+
+#Drop NA
+round1dat<- round1dat_NA %>% drop_na()
+
+
+```
+```{r}
+#set the non-numerical variables as factors 
+round1dat$village <- as.factor(round1dat$village)
+
+X <- cbind(round1dat$male, round1dat$age, round1dat$agpop, round1dat$ricearea_2010, round1dat$literacy,round1dat$village)
+
+X<- as.data.frame(X) %>% rename(male=V1, age=V2, agpop = V3, ricearea_2010=V4, literacy=V5, village=V6)
+```
+
+
+```{r}
+#Genetic Matching
+invisible(capture.output(genout1 <- GenMatch(Tr = round1dat$intensive, X=X , M=1, estimand = 'ATT', max.generations = 10)))
+```
+
+```{r}
+mout1 <- Match(Y = round1dat$takeup_survey, Tr= round1dat$intensive, X = X, M =1, estimand = 'ATT', Weight.matrix = genout1, exact = c(1,0,0,0,1,1), caliper = c(1e16, 1e16, 0.5, 0.3,1e16, 1e16 ))
+
+
+mbgen1 <- MatchBalance(intensive~ male + age + agpop + ricearea_2010 + literacy + village, data = round1dat, match.out=mout1, nboots=500)
+
+#mbgen2 <- MatchBalance(intensive~ male + age + agpop + ricearea_2010 + literacy + village, data = round1dat, match.out=mout1, nboots=500)
+
+```
+
+```{r}
+summary(mout1)
+```
+#Social network effect 
+## Table 2 replication column 2-6
+
+```{r}
+#Column 2: Round 2 participants without information, include risk_averse & disaster_prop
+dat_delay_noinfo <- dat[dat$delay == 1 & dat$info_none == 1, ]
+lm_t2c2 <- lm(takeup_survey ~ network_rate_preintensive + male + age + agpop + ricearea_2010 + literacy + 
+                intensive + risk_averse + disaster_prob + friend1 + friend2 + friend3 + friend4 + friend5 + village,data = dat_delay_noinfo)
+
+lm_t2c2
+```
+
+```{r}
+##Column 3: check the effects of household covariates and exclude others except intensive session
+lm_t2c3 <- lm(takeup_survey ~ network_rate_preintensive + network_rate_presimple + intensive 
+              + friend1 + friend2 + friend3 + friend4 + friend5 + village,
+              data = dat_delay_noinfo)
+
+lm_t2c3
+```
+```{r}
+#Column 4
+lm_t2c4 <- lm(takeup_survey ~ network_rate_preintensive + intensive + network_rate_preintensive:intensive + male + age + agpop + ricearea_2010 + literacy + risk_averse + disaster_prob + friend1 + friend2 + friend3 + friend4 + friend5 + village, data = dat_delay_noinfo)
+```
+
+
+```{r}
+#Column 5
+lm_t2c5 <- lm(takeup_survey ~ network_onlyone + network_onlytwo + network_twomore + intensive 
+              + network_onlyone:intensive + network_onlytwo:intensive + network_twomore:intensive +
+                + male + age + agpop + ricearea_2010 + literacy + risk_averse + disaster_prob 
+              + friend1 + friend2 + friend3 + friend4 + friend5 + village
+              , data = dat_delay_noinfo)
+```
+
+
+
+```{r}
+#Column 6: For people who is in the first round or people who is in second round samples who have friends and receive info
+
+dat$nofriend = 1
+dat$nofriend[dat$delay == 1 & dat$info_none == 1 & dat$network_yes == 1] = 0 #set no friend = 0 (which means they have friends) if they are in the second round, didn't receive information, and have social network 
+
+
+dat_t2c6 = dat[ (dat$delay == 0 | (dat$delay == 1 & dat$info_none == 1 & dat$nofriend == 1)), ]
+
+lm_t2c6 <- lm(takeup_survey ~ intensive + delay + intensive*delay
+              + male + age + agpop + ricearea_2010 + literacy + risk_averse + disaster_prob
+              + village
+              , data = dat_t2c6)
+
+```
+
+
+```{r}
+stargazer(lm_t2c1, lm_t2c2, lm_t2c3, lm_t2c4, lm_t2c5, lm_t2c6, 
+          omit = c("village", "friend1", "friend2", "friend3", "friend4", "friend5"), style = "aer", no.space = T, df = FALSE)
+```
+
+#Extension 2: Use Genetic Matching to measure Social network effect -- Compare with Table 2 column 2
+
+## Distribution Balance: check the distribution balance plot before matching
+```{r}
+male <- bal.plot(dat_gen3$dense_network ~ dat_gen3$male, treat = dat_gen3$dense_network) + ggtitle("Distributional Balance for Male") + xlab('Male')
+
+age <- bal.plot(dat_gen3$dense_network ~ dat_gen3$age, treat = dat_gen3$dense_network) + ggtitle("Distributional Balance for Age") + xlab('Age')
+
+agpop <- bal.plot(dat_gen3$dense_network ~ dat_gen3$agpop, treat = dat_gen3$dense_network) + ggtitle("Distributional Balance for Age Population") + xlab('Age Population')
+
+ricearea_2010 <- bal.plot(dat_gen3$dense_network ~ dat_gen3$ricearea_2010, treat = dat_gen3$dense_network) + ggtitle("Distributional Balance for Rice Area") + xlab('Rice Area')
+
+literacy <- bal.plot(dat_gen3$dense_network ~ dat_gen3$literacy, treat = dat_gen3$dense_network) + ggtitle("Distributional Balance for Literacy") + xlab('Literacy')
+
+village <- bal.plot(dat_gen3$dense_network ~ dat_gen3$village, treat = dat_gen3$dense_network) + ggtitle("Distributional Balance for Village") + xlab('Village')
+
+intensive <- bal.plot(dat_gen3$dense_network ~ dat_gen3$intensive, treat = dat_gen3$dense_network) + ggtitle("Distributional Balance for Intensive") + xlab('Intensive')
+
+risk_averse <- bal.plot(dat_gen3$dense_network ~ dat_gen3$risk_averse, treat = dat_gen3$risk_averse) + ggtitle("Distributional Balance for Risk Averse") + xlab('Risk Averse')
+
+disaster_prob <- bal.plot(dat_gen3$dense_network ~ dat_gen3$disaster_prob, treat = dat_gen3$dense_network) + ggtitle("Distributional Balance for Disaster Probability") + xlab('Disaster Probability')
+```
+
+
+```{r}
+#Distribution Balance for household characteristics
+grid.arrange(male, age, agpop, ricearea_2010, literacy, village, nrow =3, top=textGrob("Distribution balance for household characteristics", gp=gpar(fontsize=15,font=15)))
+```
+
+```{r}
+grid.arrange(intensive, risk_averse, disaster_prob, nrow =2, top=textGrob("Distribution balance plot of non-househole variables", gp=gpar(fontsize=15,font=15)))
+```
+
+## Network effect 1-1
+- treatment: people have dense network 
+- sample: 2nd round with no take-up information given
+- matching variables: household charateristics
+
+```{r}
+#Define treatment: create a binary variable dense_network as our treatment, if network_rate_preintensive > 0.4
+dat$dense_network <- 0 
+dat$dense_network[dat$network_rate_preintensive >=0.4] <-1
+```
+
+
+```{r}
+#Data preparation for genetic matching 
+
+#create dataframe for included variables
+dat_gen <- cbind(dat_delay_noinfo$male, dat_delay_noinfo$age, dat_delay_noinfo$agpop, dat_delay_noinfo$ricearea_2010, dat_delay_noinfo$literacy,factor(dat_delay_noinfo$village), dat_delay_noinfo$intensive, dat_delay_noinfo$dense_network, dat_delay_noinfo$takeup_survey)
+
+
+dat_gen<- as.data.frame(dat_gen) %>% rename(male=V1, age=V2, agpop = V3, , ricearea_2010=V4, literacy=V5, village=V6, intensive = V7, dense_network = V8, takeup_survey = V9) 
+
+#drop NAs so we can do genetic matching 
+dat_gen<- dat_gen %>% drop_na()
+
+#Dataframe for matched variable
+X2 <- subset(dat_gen, select = -c(dense_network,takeup_survey))
+
+
+```
+
+```{r}
+#Genetic Matching
+invisible(capture.output(genout2 <- GenMatch(Tr = dat_gen$dense_network, X=X2 , M=1, estimand = 'ATT', max.generations = 10)))
+```
+
+```{r}
+mout2 <- Match(Y = dat_gen$takeup_survey, Tr= dat_gen$dense_network, X=X2, M =1, estimand = 'ATT', Weight.matrix = genout2)
+
+mbgen2 <- MatchBalance(dense_network~ male + age + agpop + ricearea_2010 + literacy + village, data = dat_gen, match.out=mout2, nboots=500)
+
+
+```
+
+```{r}
+summary(mout2)
+```
+
+
+## Network effect 1-2
+- treatment: people have dense network 
+- sample: 2nd round with no take-up information given
+- matching variables: household charateristics + risk_averse + disaster_prob(exact the same as column 2)
+
+
+```{r}
+#Data preperation for genetic matching 
+
+dat_gen3 <- cbind(dat_delay_noinfo$male, dat_delay_noinfo$age, dat_delay_noinfo$agpop, dat_delay_noinfo$ricearea_2010, dat_delay_noinfo$literacy,factor(dat_delay_noinfo$village), dat_delay_noinfo$intensive, dat_delay_noinfo$risk_averse, dat_delay_noinfo$disaster_prob ,dat_delay_noinfo$dense_network, dat_delay_noinfo$takeup_survey)
+
+
+dat_gen3<- as.data.frame(dat_gen3) %>% rename(male=V1, age=V2, agpop = V3, , ricearea_2010=V4, literacy=V5, village=V6, intensive = V7, risk_averse= V8,disaster_prob = V9 ,dense_network = V10, takeup_survey = V11) 
+
+#drop NAs so we can do genetic matching 
+dat_gen3<- dat_gen3 %>% drop_na()
+
+#Dataframe for matched variable
+X4 <- subset(dat_gen3, select = -c(dense_network,takeup_survey))
+
+
+
+```
+
+```{r}
+#Genetic Matching
+invisible(capture.output(genout4 <- GenMatch(Tr = dat_gen3$dense_network, X=X4 , M=1, estimand = 'ATT', max.generations = 10)))
+```
+
+```{r}
+mout4 <- Match(Y = dat_gen3$takeup_survey, Tr= dat_gen3$dense_network, X=X4, M =1, estimand = 'ATT', Weight.matrix = genout4)
+
+mbgen4 <- MatchBalance(dense_network~ male + age + agpop + ricearea_2010 + literacy + village+risk_averse+disaster_prob, data = dat_gen3, match.out=mout4, nboots=500)
+
+```
+
+```{r}
+summary(mout4)
+```
+
+#Social network effect 2: we only examine if they have their network coming or not 
+
+## Network effect 1-2
+- treatment: as long as people have network(network_yes)
+- sample: 2nd round with no take-up information given
+- matching variables: household charateristics + risk_averse + disaster_prob(exact the same as column 2)
+
+```{r}
+#Data preperation for genetic matching 
+
+
+dat_gen2 <- cbind(dat_delay_noinfo$male, dat_delay_noinfo$age, dat_delay_noinfo$agpop, dat_delay_noinfo$ricearea_2010, dat_delay_noinfo$literacy,factor(dat_delay_noinfo$village), dat_delay_noinfo$intensive, dat_delay_noinfo$risk_averse, dat_delay_noinfo$disaster_prob, dat_delay_noinfo$network_yes, dat_delay_noinfo$takeup_survey)
+
+
+dat_gen2<- as.data.frame(dat_gen2) %>% rename(male=V1, age=V2, agpop = V3, , ricearea_2010=V4, literacy=V5, village=V6, intensive = V7, risk_averse = V8, disaster_prob= V9, network_yes = V10, takeup_survey = V11) 
+
+#drop NAs so we can do genetic matching 
+dat_gen2<- dat_gen2 %>% drop_na()
+
+#Dataframe for matched variable
+X3 <- subset(dat_gen2, select = -c(network_yes,takeup_survey))
+
+X3
+```
+
+```{r}
+#Genetic Matching
+invisible(capture.output(genout3 <- GenMatch(Tr = dat_gen2$network_yes, X=X3 , M=1, estimand = 'ATT', max.generations = 10)))
+```
+
+```{r}
+mout3 <- Match(Y = dat_gen2$takeup_survey, Tr= dat_gen2$network_yes, X=X3, M =2, estimand = 'ATT', Weight.matrix = genout3, caliper = c(1e16, 1e16, 1e16, 0.3,1e16, 1e16, 1e16, 1e16, 1e16), exact = c(0,0,0,0,1,1,0,1,0))
+
+mbgen3 <- MatchBalance(network_yes~ male + age + agpop + ricearea_2010 + literacy + village + risk_averse + disaster_prob, data = dat_gen2, match.out=mout3, nboots=500)
+
+```
+
+```{r}
+summary(mout3)
+```
+
